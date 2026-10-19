@@ -28,6 +28,7 @@ require('common');
 local ffi = require('ffi');
 local chat = require('chat');
 local imgui = require('imgui');
+local d3d8 = require('d3d8');
 local settings = require('settings');
 
 local skills = require('skills');
@@ -39,6 +40,40 @@ local default_settings = T{
     position_x = 100,
     position_y = 100,
     font_scale = 1.0,
+    opacity = T{
+        background = 0.8,
+        border = 0.5,
+        text = 1.0,
+    },
+    show_burst_names = true,
+    bg_style = 'solid',                  -- 'solid' or 'menu' (FFXI style)
+    bg_color = { 0.06, 0.06, 0.06 },     -- solid background color
+    menu_top = { 0.10, 0.08, 0.17 },     -- FFXI menu gradient, top
+    menu_bottom = { 0.125, 0.125, 0.30 },-- FFXI menu gradient, bottom
+    scanlines = 0.6,                     -- FFXI menu scanline strength
+    border_color = { 0.6, 0.6, 0.7 },
+    outline = T{
+        enabled = false,
+        thickness = 1,
+        color = { 0.0, 0.0, 0.0 },
+        opacity = 1.0,
+    },
+    list_outline = T{                    -- outline for the chain list text
+        enabled = false,
+        thickness = 1,
+        color = { 0.0, 0.0, 0.0 },
+        opacity = 1.0,
+    },
+    icon_scale = 1.0,
+    line_scale = 1.0,                    -- text size of the skillchain list lines
+    line_spacing = 0.0,                  -- extra pixels between list lines
+    ws_color = { 1.0, 1.0, 1.0 },        -- weapon skill name color
+    countdown = T{
+        scale = 3.0,
+        opacity = 0.5,
+        color = { 0.3, 1.0, 0.3 },
+        wait_color = { 1.0, 0.0, 0.0 },
+    },
     display = T{
         color = true,
         pet = true,
@@ -57,6 +92,92 @@ local chains = T{
     forceImmanence = false, -- boolean
     forceAffinity = false, -- boolean
 };
+
+-- ensure newer settings exist when loading an older settings file
+local function ValidateSettings()
+    local s = chains.settings;
+    if type(s.opacity) ~= 'table' then s.opacity = T{}; end
+    for k,v in pairs(default_settings.opacity) do
+        if type(s.opacity[k]) ~= 'number' then s.opacity[k] = v; end
+    end
+    if s.show_burst_names == nil then s.show_burst_names = default_settings.show_burst_names; end
+    if type(s.icon_scale) ~= 'number' then s.icon_scale = default_settings.icon_scale; end
+    if type(s.line_scale) ~= 'number' then s.line_scale = default_settings.line_scale; end
+    if type(s.line_spacing) ~= 'number' then s.line_spacing = default_settings.line_spacing; end
+    if type(s.ws_color) ~= 'table' or #s.ws_color < 3 then
+        s.ws_color = { default_settings.ws_color[1], default_settings.ws_color[2], default_settings.ws_color[3] };
+    end
+    local function ensureColor(t, k, d)
+        if type(t[k]) ~= 'table' or #t[k] < 3 then t[k] = { d[1], d[2], d[3] }; end
+    end
+    if s.bg_style ~= 'solid' and s.bg_style ~= 'menu' then s.bg_style = default_settings.bg_style; end
+    ensureColor(s, 'bg_color',     default_settings.bg_color);
+    ensureColor(s, 'menu_top',     default_settings.menu_top);
+    ensureColor(s, 'menu_bottom',  default_settings.menu_bottom);
+    ensureColor(s, 'border_color', default_settings.border_color);
+    if type(s.scanlines) ~= 'number' then s.scanlines = default_settings.scanlines; end
+    if type(s.outline) ~= 'table' then s.outline = T{}; end
+    if type(s.outline.enabled) ~= 'boolean' then s.outline.enabled = default_settings.outline.enabled; end
+    if type(s.outline.thickness) ~= 'number' then s.outline.thickness = default_settings.outline.thickness; end
+    if type(s.outline.opacity) ~= 'number' then s.outline.opacity = default_settings.outline.opacity; end
+    ensureColor(s.outline, 'color', default_settings.outline.color);
+    if type(s.list_outline) ~= 'table' then
+        -- migrate: start from the previous shared outline settings
+        s.list_outline = T{
+            enabled = s.outline.enabled, thickness = s.outline.thickness, opacity = s.outline.opacity,
+            color = { s.outline.color[1], s.outline.color[2], s.outline.color[3] },
+        };
+    end
+    if type(s.list_outline.enabled) ~= 'boolean' then s.list_outline.enabled = default_settings.list_outline.enabled; end
+    if type(s.list_outline.thickness) ~= 'number' then s.list_outline.thickness = default_settings.list_outline.thickness; end
+    if type(s.list_outline.opacity) ~= 'number' then s.list_outline.opacity = default_settings.list_outline.opacity; end
+    ensureColor(s.list_outline, 'color', default_settings.list_outline.color);
+    if type(s.countdown) ~= 'table' then s.countdown = T{}; end
+    for k,v in pairs(default_settings.countdown) do
+        if type(v) == 'table' then
+            if type(s.countdown[k]) ~= 'table' or #s.countdown[k] < 3 then
+                s.countdown[k] = { v[1], v[2], v[3] };
+            end
+        elseif type(s.countdown[k]) ~= 'number' then
+            s.countdown[k] = v;
+        end
+    end
+end
+ValidateSettings();
+
+-- config window state (imgui widgets need table-wrapped values)
+chains.config = { open = { false } };
+
+local function SyncConfig()
+    local s, c = chains.settings, chains.config;
+    c.background = { s.opacity.background };
+    c.border     = { s.opacity.border };
+    c.text       = { s.opacity.text };
+    c.scale      = { s.font_scale };
+    c.names      = { s.show_burst_names };
+    c.icon_scale = { s.icon_scale };
+    c.line_scale   = { s.line_scale };
+    c.line_spacing = { s.line_spacing };
+    c.ws_color     = { s.ws_color[1], s.ws_color[2], s.ws_color[3] };
+    c.bg_color     = { s.bg_color[1], s.bg_color[2], s.bg_color[3] };
+    c.menu_top     = { s.menu_top[1], s.menu_top[2], s.menu_top[3] };
+    c.menu_bottom  = { s.menu_bottom[1], s.menu_bottom[2], s.menu_bottom[3] };
+    c.border_color = { s.border_color[1], s.border_color[2], s.border_color[3] };
+    c.scanlines    = { s.scanlines };
+    c.lo_enabled   = { s.list_outline.enabled };
+    c.lo_thickness = { s.list_outline.thickness };
+    c.lo_opacity   = { s.list_outline.opacity };
+    c.lo_color     = { s.list_outline.color[1], s.list_outline.color[2], s.list_outline.color[3] };
+    c.ol_enabled   = { s.outline.enabled };
+    c.ol_thickness = { s.outline.thickness };
+    c.ol_opacity   = { s.outline.opacity };
+    c.ol_color     = { s.outline.color[1], s.outline.color[2], s.outline.color[3] };
+    c.cd_scale   = { s.countdown.scale };
+    c.cd_opacity = { s.countdown.opacity };
+    c.cd_color   = { s.countdown.color[1], s.countdown.color[2], s.countdown.color[3] };
+    c.cd_wait    = { s.countdown.wait_color[1], s.countdown.wait_color[2], s.countdown.wait_color[3] };
+end
+SyncConfig();
 
 -- store player ID
 -- * capture on init
@@ -252,6 +373,8 @@ local SkillPropNames = T{
 settings.register('settings', 'settings_update', function (s)
     if (s ~= nil) then
         chains.settings = s;
+        ValidateSettings();
+        SyncConfig();
     end
 
     settings.save();
@@ -265,10 +388,202 @@ end);
 -- based on code from skillchains by Ivaar
 --=============================================================================
 local function GetPropertyColor(t)
-    if chains.settings.display.color then
-        return colors[t]
+    local c = { 1.0, 1.0, 1.0, 1.0 };
+    if chains.settings.display.color and colors[t] then
+        c = colors[t];
     end
-    return { 1.0, 1.0, 1.0, 1.0 };
+    -- apply text opacity
+    return { c[1], c[2], c[3], c[4] * chains.settings.opacity.text };
+end
+
+--=============================================================================
+-- Element icons (icons/<name>.png) used for the magic burst display
+--=============================================================================
+local iconFiles = {
+    Fire      = 'Fire',
+    Ice       = 'Ice',
+    Wind      = 'Wind',
+    Earth     = 'Earth',
+    Lightning = 'Lightning',
+    Water     = 'Water',
+    Light     = 'Light',
+    Dark      = 'Dark',
+    Darkness  = 'Dark',
+};
+
+local iconCache = {};
+
+
+---@param element string Burst element name
+---@return userdata|nil texture
+local function GetElementIcon(element)
+    local file = iconFiles[element];
+    if not file then return nil; end
+    if iconCache[file] == nil then
+        iconCache[file] = false; -- mark as attempted so a failed load is not retried every frame
+        local texPtr = ffi.new('IDirect3DTexture8*[1]');
+        local path = ('%sicons\\%s.png'):fmt(addon.path, file);
+        local hr = ffi.C.D3DXCreateTextureFromFileA(d3d8.get_device(), path, texPtr);
+        if hr == ffi.C.S_OK then
+            iconCache[file] = d3d8.gc_safe_release(ffi.cast('IDirect3DTexture8*', texPtr[0]));
+        end
+    end
+    return iconCache[file] or nil;
+end
+
+---Return text width in pixels (handles both return styles of CalcTextSize)
+local function TextWidth(text)
+    local a = imgui.CalcTextSize(text);
+    if type(a) == 'table' then return a[1] or a.x or 0; end
+    return a or 0;
+end
+
+
+--=============================================================================
+-- Text with optional outline. The outline is drawn as copies of the text
+-- offset in 8 directions, then the real text is drawn on top (so layout and
+-- SameLine behave as normal).
+--=============================================================================
+local OUTLINE_OFFSETS = {
+    { -1, -1 }, { 0, -1 }, { 1, -1 },
+    { -1,  0 },            { 1,  0 },
+    { -1,  1 }, { 0,  1 }, { 1,  1 },
+};
+
+---@param text string
+---@param color table {r,g,b,a}
+---@param ol table|nil Outline settings (defaults to the countdown outline)
+local function DrawText(text, color, ol)
+    ol = ol or chains.settings.outline;
+    if ol.enabled and ol.opacity > 0 then
+        local x, y = imgui.GetCursorPosX(), imgui.GetCursorPosY();
+        local t = ol.thickness;
+        local oc = { ol.color[1], ol.color[2], ol.color[3], ol.opacity * (color[4] or 1.0) };
+        for _,o in ipairs(OUTLINE_OFFSETS) do
+            imgui.SetCursorPos({ x + o[1] * t, y + o[2] * t });
+            imgui.TextColored(oc, text);
+        end
+        imgui.SetCursorPos({ x, y });
+    end
+    imgui.TextColored(color, text);
+end
+
+--=============================================================================
+-- Outline option widgets shared by the chain list and countdown sections.
+---@param id string Unique suffix for widget ids
+---@param ol table Settings table {enabled, thickness, color, opacity}
+---@param w table Widget values {enabled, thickness, color, opacity}
+---@return boolean changed
+--=============================================================================
+local function OutlineControls(id, ol, w)
+    local changed = false;
+    if imgui.Checkbox('Outline##' .. id, w.enabled) then
+        ol.enabled = w.enabled[1]; changed = true;
+    end
+    if ol.enabled then
+        if imgui.SliderFloat('Outline thickness##' .. id, w.thickness, 1.0, 3.0, '%.0f px') then
+            ol.thickness = math.floor(w.thickness[1] + 0.5); changed = true;
+        end
+        if imgui.ColorEdit3('Outline color##' .. id, w.color) then
+            ol.color = { w.color[1], w.color[2], w.color[3] }; changed = true;
+        end
+        if imgui.SliderFloat('Outline opacity##' .. id, w.opacity, 0.0, 1.0, '%.2f') then
+            ol.opacity = w.opacity[1]; changed = true;
+        end
+    end
+    return changed;
+end
+
+--=============================================================================
+-- FFXI style menu background: dark purple/navy vertical gradient with
+-- horizontal scanlines and a thin inner frame, drawn with the window draw list.
+-- Returns false if the draw list calls are not supported.
+--=============================================================================
+local function PackColor(r, g, b, a)
+    local function c8(v) return math.floor(math.max(0, math.min(1, v)) * 255 + 0.5); end
+    return c8(a) * 16777216 + c8(b) * 65536 + c8(g) * 256 + c8(r);
+end
+
+local function DrawMenuBackground()
+    local s = chains.settings;
+    local alpha = s.opacity.background;
+    local ok = pcall(function()
+        local dl = imgui.GetWindowDrawList();
+        local px, py = imgui.GetWindowPos();
+        local w, h = imgui.GetWindowWidth(), imgui.GetWindowHeight();
+        local top, bot = s.menu_top, s.menu_bottom;
+        local dark = 1.0 - 0.30 * s.scanlines;   -- darkness of the alternate scanline rows
+
+        local y = 0;
+        while y < h do
+            local t = y / math.max(1, h);
+            local f = ((math.floor(y / 2)) % 2 == 0) and 1.0 or dark;
+            local r = (top[1] + (bot[1] - top[1]) * t) * f;
+            local g = (top[2] + (bot[2] - top[2]) * t) * f;
+            local b = (top[3] + (bot[3] - top[3]) * t) * f;
+            dl:AddRectFilled({ px, py + y }, { px + w, py + math.min(y + 2, h) }, PackColor(r, g, b, alpha), 0.0, 0);
+            y = y + 2;
+        end
+
+        -- inner frame (darker shade of the border color)
+        local bc, ba = s.border_color, s.opacity.border;
+        local col = PackColor(bc[1] * 0.55, bc[2] * 0.55, bc[3] * 0.55, ba);
+        dl:AddRectFilled({ px + 1, py + 1 }, { px + w - 1, py + 2 }, col, 0.0, 0);
+        dl:AddRectFilled({ px + 1, py + h - 2 }, { px + w - 1, py + h - 1 }, col, 0.0, 0);
+        dl:AddRectFilled({ px + 1, py + 1 }, { px + 2, py + h - 1 }, col, 0.0, 0);
+        dl:AddRectFilled({ px + w - 2, py + 1 }, { px + w - 1, py + h - 1 }, col, 0.0, 0);
+    end);
+    if not ok then
+        chains.menuFailed = true;
+        print('chains: FFXI menu background is not supported here, using solid background.');
+    end
+end
+
+--=============================================================================
+-- Draw the large watermark countdown centered in the window, with the magic
+-- burst element icons to its right (same height as the number).
+-- Drawn first so the rest of the content sits on top of it.
+---@param text string Number to display
+---@param color table Color {r,g,b,a}
+---@param bursts table|nil List of burst element names
+--=============================================================================
+local function DrawCountdown(text, color, bursts)
+    local fs = chains.settings.font_scale;
+    local cd = chains.settings.countdown;
+    local cx, cy = imgui.GetCursorPosX(), imgui.GetCursorPosY();
+
+    imgui.SetWindowFontScale(fs * cd.scale);
+    local tw, th = TextWidth(text), imgui.GetTextLineHeight();
+    local winW, winH = imgui.GetWindowWidth(), imgui.GetWindowHeight();
+
+    -- gather icons that loaded successfully
+    local icons = {};
+    for _,v in ipairs(bursts or {}) do
+        local icon = GetElementIcon(v);
+        if icon then table.insert(icons, icon); end
+    end
+
+    local iconH = th * chains.settings.icon_scale;
+    local gap = 6 * fs;
+    local groupW = tw;
+    if #icons > 0 then
+        groupW = groupW + gap + #icons * iconH + (#icons - 1) * gap;
+    end
+
+    local x = math.max(0, (winW - groupW) / 2);
+    imgui.SetCursorPos({ x, math.max(0, (winH - th) / 2) });
+    DrawText(text, color);
+
+    x = x + tw + gap;
+    for _,icon in ipairs(icons) do
+        imgui.SetCursorPos({ x, math.max(0, (winH - iconH) / 2) });
+        imgui.Image(tonumber(ffi.cast('uint32_t', icon)), { iconH, iconH },
+            { 0, 0 }, { 1, 1 }, { 1.0, 1.0, 1.0, cd.opacity }, { 0, 0, 0, 0 });
+        x = x + iconH + gap;
+    end
+
+    imgui.SetWindowFontScale(fs);
+    imgui.SetCursorPos({ cx, cy });
 end
 
 --=============================================================================
@@ -544,6 +859,8 @@ local GetSkillchains = function(target)
                 -- add skillchain information to table
                 local skillchain = {
                     outText = ('%-17s>> Lv.%d'):fmt(action.en, match.level),
+                    outName = ('%-17s'):fmt(action.en),
+                    outLevel = ('>> Lv.%d'):fmt(match.level),
                     outProp = match.skillchain,
                 }
                 table.insert(levelTable[match.level],skillchain);
@@ -968,7 +1285,11 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
     local render = targetId ~= nil and targetTable[targetId] and targetTable[targetId].dur-(now-targetTable[targetId].ts) > 0;
 
-    if render or chains.visible or chains.position then
+    local configOpen = chains.config.open[1];
+
+    if render or chains.visible or chains.position or configOpen then
+
+        local op = chains.settings.opacity;
 
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
@@ -977,9 +1298,13 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             ImGuiWindowFlags_NoFocusOnAppearing,
             ImGuiWindowFlags_NoNav)
 
-        imgui.SetNextWindowBgAlpha(0.8)
-        imgui.SetNextWindowSize({ 350 * chains.settings.font_scale, -1 }, ImGuiCond_Always)
-        imgui.SetNextWindowSizeConstraints({ -1, -1 }, { FLT_MAX, FLT_MAX })
+        local useMenu = chains.settings.bg_style == 'menu' and not chains.menuFailed;
+        imgui.SetNextWindowBgAlpha(useMenu and 0.0 or op.background)
+        imgui.SetNextWindowSize({ 350 * chains.settings.font_scale * math.max(1.0, chains.settings.line_scale), -1 }, ImGuiCond_Always)
+
+        -- keep a minimum height so the large countdown number always fits
+        local minHeight = imgui.GetFontSize() * chains.settings.font_scale * chains.settings.countdown.scale + 16;
+        imgui.SetNextWindowSizeConstraints({ -1, minHeight }, { FLT_MAX, FLT_MAX })
 
         if chains.position then
             imgui.SetNextWindowPos({ chains.position.x, chains.position.y }, ImGuiCond_Always, { 0, 0 });
@@ -987,79 +1312,69 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             imgui.SetNextWindowPos({ chains.settings.position_x, chains.settings.position_y }, ImGuiCond_Appearing, { 0, 0 });
         end
 
+        -- border and default text opacity
+        imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0);
+        local bc, bg = chains.settings.border_color, chains.settings.bg_color;
+        imgui.PushStyleColor(ImGuiCol_WindowBg, { bg[1], bg[2], bg[3], useMenu and 0.0 or op.background });
+        imgui.PushStyleColor(ImGuiCol_Border, { bc[1], bc[2], bc[3], op.border });
+        imgui.PushStyleColor(ImGuiCol_Text, { 1.0, 1.0, 1.0, op.text });
+        imgui.PushStyleColor(ImGuiCol_Separator, { bc[1], bc[2], bc[3], op.border });
+
         if (imgui.Begin('chains', true, flags)) then
+
+            if useMenu then
+                DrawMenuBackground();
+            end
 
             if render then
                 imgui.SetWindowFontScale(chains.settings.font_scale)
 
-                local timediff = now-targetTable[targetId].ts;
-                local timer = targetTable[targetId].dur-timediff;
+                local target = targetTable[targetId];
+                local timediff = now-target.ts;
+                local timer = target.dur-timediff;
+                local cd = chains.settings.countdown;
+                local fs = chains.settings.font_scale;
 
-                -- Timer
-                if not targetTable[targetId].closed then
-                    if timediff < targetTable[targetId].wait then
-                        imgui.TextColored({ 1.0, 0.0, 0.0, 1.0 },('Wait  %d'):fmt(targetTable[targetId].wait-timediff));
-                    else
-                        imgui.TextColored({ 0.0, 1.0, 0.0, 1.0 },('Go!   %d'):fmt(timer));
-                    end
-                else
-                    imgui.Text(('Burst %d'):fmt(timer));
-                end
-
-                -- Step, active properties and burst element
-                imgui.Separator();
-                imgui.Text(('Step: %d >> %s'):fmt(targetTable[targetId].step, targetTable[targetId].en));
-                imgui.Text('[');
-                imgui.SameLine();
-                if targetTable[targetId].bound then
-                    imgui.Text(('Chainbound Lv.%d'):fmt(targetTable[targetId].bound));
-                else
-                    for k,v in pairs(targetTable[targetId].property) do
-                        if k > 1 then
-                            imgui.SameLine(0,0);
-                            imgui.Text(',');
-                            imgui.SameLine();
-                        end
-                        imgui.TextColored(GetPropertyColor(v),v);
-                    end
-                end
-                imgui.SameLine();
-                imgui.Text(']');
-                if targetTable[targetId].step > 1 then
-                    imgui.SameLine();
-                    imgui.Text(' (');
-                    imgui.SameLine();
-                    for k,v in pairs(chainInfo[targetTable[targetId].property[1]].burst) do
-                        if k > 1 then
-                            imgui.SameLine(0,0);
-                            imgui.Text(',');
-                            imgui.SameLine();
-                        end
-                        imgui.TextColored(GetPropertyColor(v),v);
-                    end
-                    imgui.SameLine();
-                    imgui.Text(')');
-                end
+                -- Watermark countdown (red while waiting) with burst icons to its right on step 2+
+                local waiting = (not target.closed) and timediff < target.wait;
+                local c = waiting and cd.wait_color or cd.color;
+                local bursts = target.step > 1 and target.property[1] and chainInfo[target.property[1]]
+                               and chainInfo[target.property[1]].burst or nil;
+                DrawCountdown(('%d'):fmt(waiting and (target.wait-timediff) or timer),
+                              { c[1], c[2], c[3], cd.opacity }, bursts);
 
                 -- Available skillchains
-                imgui.Separator();
-                if not targetTable[targetId].closed then
-                    local skillchains = GetSkillchains(targetTable[targetId]);
-                    -- Build skillchains list for target if it does not exist
-                    --if not targetTable[targetId].skillchains then
-                    --    targetTable[targetId].skillchains = skillchains;
-                    --end
+                if not target.closed then
+                    local skillchains = GetSkillchains(target);
+                    local wc = chains.settings.ws_color;
+                    local wsColor = { wc[1], wc[2], wc[3], op.text };
+                    local spacing = imgui.GetStyle().ItemSpacing;
+
+                    imgui.SetWindowFontScale(fs * chains.settings.line_scale);
+                    imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { spacing.x, math.max(0, spacing.y + chains.settings.line_spacing) });
                     for _,v in pairs(skillchains) do
-                        imgui.Text(v.outText);
+                        DrawText(v.outName, wsColor, chains.settings.list_outline);
+                        imgui.SameLine(0,0);
+                        DrawText(v.outLevel, { 1.0, 1.0, 1.0, op.text }, chains.settings.list_outline);
                         imgui.SameLine();
-                        imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+                        DrawText(v.outProp, GetPropertyColor(v.outProp), chains.settings.list_outline);
                     end
+                    imgui.PopStyleVar(1);
+                    imgui.SetWindowFontScale(fs);
                 end
-            elseif chains.visible then
+            elseif chains.visible or configOpen then
                 imgui.SetWindowFontScale(chains.settings.font_scale)
+                if configOpen then
+                    local pc = chains.settings.countdown.color;
+                    DrawCountdown('7', { pc[1], pc[2], pc[3], chains.settings.countdown.opacity }, { 'Earth', 'Dark' });
+                end
                 imgui.Text('');
                 imgui.Text('                 --- Chains ---                 ');
-                imgui.Text('         Click and drag to move display         ');
+                if configOpen and not chains.visible then
+                    imgui.Text('        Preview - adjust options in Config       ');
+                else
+                    imgui.Text('         Click and drag to move display         ');
+                end
                 imgui.Text('');
             end
 
@@ -1069,6 +1384,150 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
             -- store current window position
             chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
+        end
+        imgui.End();
+        imgui.PopStyleColor(4);
+        imgui.PopStyleVar(1);
+    end
+
+    -- Config window
+    if configOpen then
+        imgui.SetNextWindowSize({ 320, 0 }, ImGuiCond_FirstUseEver);
+        if imgui.Begin('Chains Config', chains.config.open, ImGuiWindowFlags_AlwaysAutoResize) then
+            local cfg = chains.config;
+            local changed = false;
+
+            imgui.Text('Opacity');
+            imgui.Separator();
+            if imgui.SliderFloat('Background', cfg.background, 0.0, 1.0, '%.2f') then
+                chains.settings.opacity.background = cfg.background[1]; changed = true;
+            end
+            if imgui.SliderFloat('Border', cfg.border, 0.0, 1.0, '%.2f') then
+                chains.settings.opacity.border = cfg.border[1]; changed = true;
+            end
+            if imgui.SliderFloat('Text', cfg.text, 0.1, 1.0, '%.2f') then
+                chains.settings.opacity.text = cfg.text[1]; changed = true;
+            end
+
+            imgui.Spacing();
+            imgui.Text('Background');
+            imgui.Separator();
+            if imgui.RadioButton('Solid', chains.settings.bg_style == 'solid') then
+                chains.settings.bg_style = 'solid'; changed = true;
+            end
+            imgui.SameLine();
+            if imgui.RadioButton('FFXI menu', chains.settings.bg_style == 'menu') then
+                chains.settings.bg_style = 'menu'; chains.menuFailed = nil; changed = true;
+            end
+            if chains.settings.bg_style == 'menu' then
+                if imgui.ColorEdit3('Menu top##bg', cfg.menu_top) then
+                    chains.settings.menu_top = { cfg.menu_top[1], cfg.menu_top[2], cfg.menu_top[3] }; changed = true;
+                end
+                if imgui.ColorEdit3('Menu bottom##bg', cfg.menu_bottom) then
+                    chains.settings.menu_bottom = { cfg.menu_bottom[1], cfg.menu_bottom[2], cfg.menu_bottom[3] }; changed = true;
+                end
+                if imgui.SliderFloat('Scanlines##bg', cfg.scanlines, 0.0, 1.0, '%.2f') then
+                    chains.settings.scanlines = cfg.scanlines[1]; changed = true;
+                end
+            else
+                if imgui.ColorEdit3('Color##bg', cfg.bg_color) then
+                    chains.settings.bg_color = { cfg.bg_color[1], cfg.bg_color[2], cfg.bg_color[3] }; changed = true;
+                end
+            end
+            if imgui.ColorEdit3('Border color##bg', cfg.border_color) then
+                chains.settings.border_color = { cfg.border_color[1], cfg.border_color[2], cfg.border_color[3] }; changed = true;
+            end
+
+            imgui.Spacing();
+            imgui.Text('Countdown number');
+            imgui.Separator();
+            if imgui.SliderFloat('Size##cd', cfg.cd_scale, 1.0, 6.0, '%.1f') then
+                chains.settings.countdown.scale = cfg.cd_scale[1]; changed = true;
+            end
+            if imgui.ColorEdit3('Color##cd', cfg.cd_color) then
+                chains.settings.countdown.color = { cfg.cd_color[1], cfg.cd_color[2], cfg.cd_color[3] }; changed = true;
+            end
+            if imgui.ColorEdit3('Wait color##cd', cfg.cd_wait) then
+                chains.settings.countdown.wait_color = { cfg.cd_wait[1], cfg.cd_wait[2], cfg.cd_wait[3] }; changed = true;
+            end
+            if imgui.SliderFloat('Opacity##cd', cfg.cd_opacity, 0.05, 1.0, '%.2f') then
+                chains.settings.countdown.opacity = cfg.cd_opacity[1]; changed = true;
+            end
+            if OutlineControls('cd', chains.settings.outline,
+                { enabled = cfg.ol_enabled, thickness = cfg.ol_thickness, color = cfg.ol_color, opacity = cfg.ol_opacity }) then
+                changed = true;
+            end
+
+            imgui.Spacing();
+            imgui.Text('Burst icons');
+            imgui.Separator();
+            if imgui.SliderFloat('Icon size (x countdown)', cfg.icon_scale, 0.3, 2.0, '%.2f') then
+                chains.settings.icon_scale = cfg.icon_scale[1]; changed = true;
+            end
+
+            imgui.Spacing();
+            imgui.Text('Chain list');
+            imgui.Separator();
+            if imgui.ColorEdit3('Weapon skill name##ws', cfg.ws_color) then
+                chains.settings.ws_color = { cfg.ws_color[1], cfg.ws_color[2], cfg.ws_color[3] }; changed = true;
+            end
+            if imgui.SliderFloat('Text size##ln', cfg.line_scale, 0.5, 2.5, '%.2f') then
+                chains.settings.line_scale = cfg.line_scale[1]; changed = true;
+            end
+            if imgui.SliderFloat('Line spacing##ln', cfg.line_spacing, 0.0, 20.0, '%.0f px') then
+                chains.settings.line_spacing = cfg.line_spacing[1]; changed = true;
+            end
+            if OutlineControls('ls', chains.settings.list_outline,
+                { enabled = cfg.lo_enabled, thickness = cfg.lo_thickness, color = cfg.lo_color, opacity = cfg.lo_opacity }) then
+                changed = true;
+            end
+
+            imgui.Spacing();
+            imgui.Text('Display');
+            imgui.Separator();
+            if imgui.SliderFloat('Font scale', cfg.scale, 0.5, 2.0, '%.2f') then
+                chains.settings.font_scale = cfg.scale[1]; changed = true;
+            end
+
+            imgui.Spacing();
+            if imgui.Button('Reset all') then
+                local d = default_settings;
+                for k,v in pairs(d.opacity) do chains.settings.opacity[k] = v; end
+                chains.settings.icon_scale = d.icon_scale;
+                chains.settings.line_scale = d.line_scale;
+                chains.settings.line_spacing = d.line_spacing;
+                chains.settings.ws_color = { d.ws_color[1], d.ws_color[2], d.ws_color[3] };
+                chains.settings.show_burst_names = d.show_burst_names;
+                chains.settings.bg_style = d.bg_style;
+                chains.settings.bg_color = { d.bg_color[1], d.bg_color[2], d.bg_color[3] };
+                chains.settings.menu_top = { d.menu_top[1], d.menu_top[2], d.menu_top[3] };
+                chains.settings.menu_bottom = { d.menu_bottom[1], d.menu_bottom[2], d.menu_bottom[3] };
+                chains.settings.border_color = { d.border_color[1], d.border_color[2], d.border_color[3] };
+                chains.settings.scanlines = d.scanlines;
+                chains.settings.list_outline = T{
+                    enabled = d.list_outline.enabled, thickness = d.list_outline.thickness, opacity = d.list_outline.opacity,
+                    color = { d.list_outline.color[1], d.list_outline.color[2], d.list_outline.color[3] },
+                };
+                chains.settings.outline = T{
+                    enabled = d.outline.enabled, thickness = d.outline.thickness, opacity = d.outline.opacity,
+                    color = { d.outline.color[1], d.outline.color[2], d.outline.color[3] },
+                };
+                chains.settings.countdown = T{
+                    scale = d.countdown.scale, opacity = d.countdown.opacity,
+                    color = { d.countdown.color[1], d.countdown.color[2], d.countdown.color[3] },
+                    wait_color = { d.countdown.wait_color[1], d.countdown.wait_color[2], d.countdown.wait_color[3] },
+                };
+                SyncConfig();
+                changed = true;
+            end
+            imgui.SameLine();
+            if imgui.Button('Close') then
+                cfg.open[1] = false;
+            end
+
+            if changed then
+                settings.save();
+            end
         end
         imgui.End();
     end
@@ -1119,6 +1578,10 @@ ashita.events.register('command', 'command_cb', function (e)
     --========================================================================
     -- Window management
     --========================================================================
+    if (#args == 2) and (args[2] == 'config') then
+        chains.config.open[1] = not chains.config.open[1];
+    end
+
     if (#args == 2) and (args[2] == 'visible') then 
         chains.visible = not chains.visible;
     end
